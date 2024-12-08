@@ -1,0 +1,133 @@
+setwd("D:/Rproject/BulkRNA/FindHistoneDecorationLabel")
+
+library(ggplot2)
+library(dplyr)
+library(pheatmap)
+
+DiffGene <- readRDS('DiffResultAll.rds')
+M1_M0 <- DiffGene$M1_vs_M0
+M2_M1 <- DiffGene$M2_vs_M1
+M2_M0 <- DiffGene$M2_vs_M0
+
+# 将 Change 列的 Up 和 Down 互换的函数
+swap_change <- function(matrix) {
+  matrix %>%
+    mutate(Change = ifelse(Change == "Up", "Down",
+                           ifelse(Change == "Down", "Up", Change)))
+}
+
+# 互换每个矩阵的 Up 和 Down
+M1_M0 <- swap_change(M1_M0)
+M2_M1 <- swap_change(M2_M1)
+M2_M0 <- swap_change(M2_M0)
+
+# 定义乳酸化、甲基化和乙酰化基因集 全部转换为大写
+lactylation_genes <- toupper(c("Sirt1", "Sirt2", "Cbp", "Gcn5", "Hdac3", "Hdac2", "Hdac1", "P300", "Sirt3"))
+methylation_genes <- toupper(c('Kmt6a', 'Kdm6a', 'Mina', 'Kmt3e', 'Setd3', 'Kdm3c', 'Jarid2', 'Kmt5b',
+                               'Kdm1a', 'Kdm5d', 'Kdm7a', 'Kmt2g', 'Kmt3c', 'Dmt6b', 'Kdm6b', 'Kdm5b', 
+                               'Kdm3a', 'Kdm7c', 'Kmt1a', "Alkbh4"))
+acetylation_genes <- toupper(c('Hdac6', 'Kat5', 'Kat13a', 'Sirt7', 'Hdac5', 'Kat13b', 'Kat1',
+                               'Hdac9', 'Kat13d', 'Sirt1', 'Sirt2', 'Hdac3', 'Kat13c', 'Kat8',
+                               'Kat2b', 'Hdac1', 'Kat4', 'Hdac4'))
+
+# 合并所有基因
+genes_of_interest <- unique(c(lactylation_genes, methylation_genes, acetylation_genes))
+
+# 定义函数提取p值和Change
+extract_data <- function(matrix, genes_of_interest, comparison_name) {
+  matrix %>%
+    filter(toupper(geneID) %in% genes_of_interest) %>%
+    mutate(Comparison = comparison_name) %>%
+    select(geneID, pvalue, Change) %>%
+    rename(!!paste0("pvalue_", comparison_name) := pvalue,
+           !!paste0("Change_", comparison_name) := Change)
+}
+
+# 提取数据
+data_M1_M0 <- extract_data(M1_M0, genes_of_interest, "M1_vs_M0")
+data_M2_M1 <- extract_data(M2_M1, genes_of_interest, "M2_vs_M1")
+data_M2_M0 <- extract_data(M2_M0, genes_of_interest, "M2_vs_M0")
+
+# 合并数据
+all_data <- full_join(data_M1_M0, data_M2_M1, by = "geneID") %>%
+  full_join(data_M2_M0, by = "geneID")
+
+# 设置基因ID为行名
+rownames(all_data) <- all_data$geneID
+all_data <- all_data[,-1]
+
+# 处理p值矩阵和Change矩阵
+pvalue_matrix <- all_data %>% select(starts_with("pvalue")) %>% as.matrix()
+change_matrix <- all_data %>% select(starts_with("Change"))
+
+# 替换NA值
+pvalue_matrix[is.na(pvalue_matrix)] <- 1  # 用1表示不显著
+log_pvalues <- -log10(pvalue_matrix)  # 转换为-log10(p)
+
+# 构造热图矩阵
+heatmap_matrix <- log_pvalues
+for (i in seq_along(colnames(heatmap_matrix))) {
+  comp <- colnames(heatmap_matrix)[i]
+  change_col <- paste0("Change_", gsub("pvalue_", "", comp))
+  heatmap_matrix[, i] <- ifelse(change_matrix[[change_col]] == "Up",
+                                heatmap_matrix[, i], # 上调保持为正值
+                                -heatmap_matrix[, i]) # 下调转换为负值
+}
+
+# 绘制热图
+heatmap_matrix[is.na(heatmap_matrix)] <- 0  
+heatmap_matrix[is.infinite(heatmap_matrix)] <- 0 
+
+# 创建基因组别信息
+gene_groups <- data.frame(
+  geneID = rownames(heatmap_matrix),
+  Group = ifelse(rownames(heatmap_matrix) %in% lactylation_genes, "Lactylation",
+                 ifelse(rownames(heatmap_matrix) %in% methylation_genes, "Methylation",
+                        ifelse(rownames(heatmap_matrix) %in% acetylation_genes, "Acetylation", "Unknown")))
+)
+
+# 按组别排序
+gene_groups <- gene_groups %>%
+  arrange(Group)
+
+# 重新排序热图矩阵
+heatmap_matrix <- heatmap_matrix[match(gene_groups$geneID, rownames(heatmap_matrix)), ]
+
+# 创建行注释
+row_annotation <- data.frame(Group = factor(gene_groups$Group, levels = c("Lactylation", "Methylation", "Acetylation", "Unknown")))
+rownames(row_annotation) <- gene_groups$geneID
+
+# 设置注释颜色
+group_colors <- list(Group = c(Lactylation = "#FDB462", Methylation = "#80B1D3", Acetylation = "#B3DE69", Unknown = "#CCCCCC"))
+
+# 绘制热图
+pheatmap(
+  heatmap_matrix,
+  color = colorRampPalette(c("#7DA6C6", "white", "#E68B81"))(100), # 蓝色表示下调，红色表示上调
+  cluster_rows = FALSE, # 关闭基因的聚类，保持分类顺序
+  cluster_cols = FALSE, # 列（比较组）不聚类
+  display_numbers = TRUE, # 显示数值
+  annotation_row = row_annotation, # 添加行注释
+  annotation_colors = group_colors, # 设置注释颜色
+  main = "Gene-wise Directional -log10(p-value) Heatmap with Group Annotations",
+  fontsize_row = 8,
+  fontsize_col = 10
+)
+# save file
+output_file <- "Heatmap of Genes.png"
+pheatmap(
+  heatmap_matrix,
+  color = colorRampPalette(c("#7DA6C6", "white", "#E68B81"))(100), # 蓝色表示下调，红色表示上调
+  cluster_rows = FALSE, # 关闭基因的聚类，保持分类顺序
+  cluster_cols = FALSE, # 列（比较组）不聚类
+  display_numbers = TRUE, # 显示数值
+  annotation_row = row_annotation, # 添加行注释
+  annotation_colors = group_colors, # 设置注释颜色
+  main = "Gene-wise Heatmap with Group Annotations",
+  fontsize_row = 8,
+  fontsize_col = 10,
+  width = 7,
+  height = 8,
+  dpi = 800,
+  filename = output_file # 保存文件路径
+)
