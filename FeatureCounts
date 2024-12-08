@@ -1,0 +1,112 @@
+setwd("D:/Rproject/BulkRNA/FindHistoneDecorationLabel")
+
+# 加载必要的R包
+library(affy)
+library(pd.hg.u133a)
+library(pd.hg.u133b)
+library(dplyr)
+library(R.utils)
+library(limma)
+library(sva)         # 用于批量效应校正
+library(hgu133a.db)
+library(hgu133b.db)
+library(pheatmap)
+
+# 读取芯片A的数据（HG-U133A）
+chipA_path <- "E:/BioBank/BulkRNA/GSE5099M0M1M2AllLabelGene/ChipA"
+affy_dataA <- ReadAffy(celfile.path = chipA_path)
+esetA <- mas5(affy_dataA)
+
+# 读取芯片B的数据（HG-U133B）
+chipB_path <- "E:/BioBank/BulkRNA/GSE5099M0M1M2AllLabelGene/ChipB"
+affy_dataB <- ReadAffy(celfile.path = chipB_path)
+esetB <- mas5(affy_dataB)
+
+# 提取表达矩阵
+exprA <- exprs(esetA)
+exprB <- exprs(esetB)
+
+# 获取基因注释
+genesA <- select(hgu133a.db, keys=rownames(exprA), keytype="PROBEID", columns=c("SYMBOL"))
+genesB <- select(hgu133b.db, keys=rownames(exprB), keytype="PROBEID", columns=c("SYMBOL"))
+
+# 合并表达矩阵基于基因Symbol
+convert_probes_to_symbols <- function(exprA, genesA) {
+  probe_to_symbol <- setNames(genesA$SYMBOL, genesA$PROBEID)
+  exprA_rownames <- rownames(exprA)
+  new_rownames <- probe_to_symbol[exprA_rownames]
+  rownames(exprA) <- new_rownames
+  exprA <- as.data.frame(exprA)
+  return(exprA)
+}
+exprA <- convert_probes_to_symbols(exprA, genesA)
+exprB <- convert_probes_to_symbols(exprB, genesB)
+
+# 合并两个平台的结果
+row_names_A <- rownames(exprA)
+row_names_B <- rownames(exprB)
+# 找到两个平台共有的基因（交集）
+common_genes <- intersect(row_names_A, row_names_B)
+# 提取共有基因的数据
+exprA_common <- exprA[common_genes, , drop = FALSE]
+exprB_common <- exprB[common_genes, , drop = FALSE]
+# 计算共有基因的平均值
+expr_common <- (exprA_common + exprB_common) / 2
+
+# 提取仅在ChipA和ChipB中的特有基因
+exprA_unique <- exprA[setdiff(row_names_A, common_genes), , drop = FALSE]
+exprB_unique <- exprB[setdiff(row_names_B, common_genes), , drop = FALSE]
+
+# 修改列名
+original_colnamesA <- colnames(exprA_unique)
+original_colnamesB <- colnames(exprB_unique)
+original_colnamesComm <- colnames(expr_common)
+rename_columns <- function(colnames, data_matrix) {
+  cols_with_gz <- grepl("gz", colnames)
+  data_matrix_no_gz <- data_matrix[, !cols_with_gz, drop = FALSE]
+  colnames_no_gz <- sub("gz", "", colnames(data_matrix_no_gz))
+  key_parts <- sub(".*_([A-Za-z0-9]+_[D0-9]+)_.*", "\\1", colnames_no_gz)
+  unique_names <- make.unique(key_parts, sep = "_")
+  colnames(data_matrix_no_gz) <- unique_names
+  return(data_matrix_no_gz)
+}
+exprA_unique <- rename_columns(original_colnamesA, exprA_unique)
+exprB_unique <- rename_columns(original_colnamesB, exprB_unique)
+expr_common <- rename_columns(original_colnamesComm, expr_common)
+
+# 纵向合并（三合一）
+mycounts <- rbind(exprA_unique, exprB_unique, expr_common)
+write.csv(mycounts, file = 'AllGene.csv')
+
+genes_of_interest <- c("SIRT1", "SIRT2", "CBP", "GCN5", "HDAC3", "HDAC2", "HDAC1", "P300", "SIRT3")
+GeneRows <- mycounts[genes_of_interest, , drop = FALSE]
+GeneRows <- GeneRows[apply(GeneRows, 1, function(x) all(is.finite(x))), ]
+pheatmap(GeneRows, 
+         cluster_rows = TRUE,
+         cluster_cols = FALSE,
+         scale = "row",
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         main = "Expression Heatmap for ALKBH genes",
+         color = colorRampPalette(c("blue", "white", "red"))(50),
+         filename = "LactateGene.png", 
+         width = 8, 
+         height = 8, 
+         dpi = 800)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
