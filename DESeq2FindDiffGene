@@ -1,0 +1,134 @@
+setwd("D:/Rproject/BulkRNA/FindHistoneDecorationLabel")
+
+library(DESeq2)
+library(readxl)
+library(pheatmap)
+library(ggplot2)
+library(ggsci)
+library(ggrepel)
+
+mycounts <- read.csv('AllGene.csv')
+rownames(mycounts) <- mycounts[,1]
+mycounts <- mycounts[, -1]
+gene_ids <- rownames(mycounts)
+# 将数字从字符类型转化为数值类型 同时排除NA
+mycounts <- data.frame(lapply(mycounts, function(x) as.numeric(as.character(x))))
+rownames(mycounts) <- gene_ids
+
+condition <- factor(c(rep("MonocyteT0", 3), rep("MonocyteDay3", 3), rep("M0", 3),
+                      rep("M1", 3), rep("M2", 3)),
+                    levels = c("MonocyteT0", "MonocyteDay3", "M0", 
+                               "M1", 'M2'))
+
+# 设置colData用于将condition与样本进行对应
+colData <- data.frame(row.names = colnames(mycounts), condition)
+mycounts_df <- as.data.frame(mycounts)
+mycounts_clean_df <- na.omit(mycounts_df)
+mycounts <- as.matrix(mycounts_clean_df)
+# 数据整数化 这里不能太大 太大会导致数字无法识别报NA的错
+# 不能高于10^4
+mycounts <- round(mycounts * 10^4)
+# 创建dds对象
+mycounts[is.na(mycounts)] <- 0
+dds <- DESeqDataSetFromMatrix(mycounts, colData, design = ~condition)
+dds <- DESeq(dds, fitType = "local")
+saveRDS(dds, "E:/BioBank/BulkRNA/GSE5099M0M1M2AllLabelGene/Nor_mergeMatrix.rds")
+# 收集并保存标准化后的数据
+nor_counts <- as.data.frame(counts(dds, nor = T))
+write.csv(nor_counts, "E:/BioBank/BulkRNA/GSE5099M0M1M2AllLabelGene/Nor_mergeMatrix.csv")
+
+# 上游处理结束
+dds <- readRDS("E:/BioBank/BulkRNA/GSE5099M0M1M2AllLabelGene/Nor_mergeMatrix.rds") # ————————————————————这是一个checkpoint
+
+## ——————————————————————————————开始进行数据软化——————————————————————————————
+# 使用不同方法进行数据软化
+vst <- vst(dds, blind = FALSE, fitType = "local")
+vst_data <- as.data.frame(assay(vst))
+# 控制图片大小
+options(repr.plot.width = 6,repr.plot.height = 6)
+plotPCA(vst)
+# 如果需要就图片进行存储，还需运行下列两行代码
+# png(filename = "vstPCA.png")
+# dev.off()
+
+# 使用rld算法进行数据可视化，基础代码同上
+rld <- rlog(dds, blind = FALSE, fitType = "local")
+rld_data <- as.data.frame(assay(vst))
+options(repr.plot.width = 6,repr.plot.height = 6)
+plotPCA(rld)
+
+# 使用ntd算法进行数据可视化
+ntd <- normTransform(dds)
+ntd_data <- as.data.frame(assay(ntd))
+options(repr.plot.width = 6,repr.plot.height = 6)
+plotPCA(ntd)
+## ——————————————————————————————数据软化结束——————————————————————————————
+
+
+
+## ——————————————————————————————进行降维聚类——————————————————————————————
+# 取信vst结果 因为最优秀
+PCA_data <- plotPCA(vst, intgroup = "condition", returnData = T)
+names(PCA_data)[3] <- "Group"
+
+# 对获取的PCA_data数据进行ggplot2绘图
+PCA_plot <- ggplot(PCA_data,aes(x = PC1, y = PC2))+     #ggplot2需要数据集与横纵轴的映射
+  geom_point(aes(color = Group),size =3)+               #可以通过data.frame中的一些选项映射颜色
+  labs(x = "PC1:47% variance", y  ="PC2: 25% variance")+#标签为前述plotPCA的标签
+  scale_color_aaas()+                                   #本行为一个配色方案，来自ggsci包
+  theme_bw()+                                      
+  theme(legend.position=c(0.2,0.83),
+        legend.background = element_rect(colour = "grey"),
+        legend.text=element_text(size=10))              #这三列用于调整标签的格式
+options(repr.plot.width=6, repr.plot.height=6)#该语句用于在jupyter页面里控制图片大小 Rstudio中不需要
+# 如果保存图像运行下列这段代码
+ggsave(filename = "PCA.png", plot = PCA_plot, width = 8, height = 8, dpi = 800)
+## ——————————————————————————————降维聚类结束——————————————————————————————
+
+# 从 DESeq2 分析中获取结果并转换为数据框，同时保留基因ID
+res <- results(dds, contrast = c("因子变量", "对比组", "参考组")) #——————————————————————————不运行这一行
+# 定义函数用于后期对比对的批量化执行 批量化执行的结果将会被存放进一个矩阵列表中
+find_diff_genes <- function(dds, groups, p_filter = 0.05, log_fc_threshold = log2(2)) {
+  results_list <- list()
+  for (i in 1:(length(groups) - 1)) {
+    for (j in (i + 1):length(groups)) {
+      contrast <- c("condition", groups[j], groups[i])
+      res <- results(dds, contrast = contrast)
+      diff_org <- as.data.frame(res@listData)
+      diff_org$geneID <- rownames(res)
+      diff1 <- na.omit(diff_org)
+      diff1$Change <- as.factor(ifelse(diff1$padj < p_filter & abs(diff1$log2FoldChange) > log_fc_threshold, 
+                                       ifelse(diff1$log2FoldChange > log_fc_threshold, "Up", "Down"), "Not"))
+      diffPeak <- diff1[diff1$Change %in% c("Down", "Up"), ]
+      result_name <- paste0(groups[j], "_vs_", groups[i])
+      results_list[[result_name]] <- diffPeak
+      write.csv(diffPeak, file = paste0(result_name, ".csv"), row.names = FALSE)
+    }
+  }
+  return(results_list)
+}
+
+condition <- factor(c(rep("MonocyteT0", 3), rep("MonocyteDay3", 3), rep("M0", 3),
+                      rep("M1", 3), rep("M2", 3)),
+                    levels = c("MonocyteT0", "MonocyteDay3", "M0", 
+                               "M1", 'M2'))
+
+groups <- levels(condition)
+diff_results <- find_diff_genes(dds, groups)
+saveRDS(diff_results, 'DiffResultAll.rds')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
